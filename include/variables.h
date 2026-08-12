@@ -2,6 +2,11 @@
 
 #define VARIABLES_H
 
+#include <stddef.h>  // for size_t
+
+#ifdef __cplusplus
+  #include <Arduino.h>  // for IPAddress, String types
+#endif
 
 // variables externes
 
@@ -59,8 +64,6 @@
 //#define STM32  //incompatible du modbus, sauf à changer les pin
 // #define OTA
 
-#define LATITUDE "48.8461"  // Garches => pour récupération Temp Ext
-#define LONGITUDE "2.1889"
 
 // Definir le canal WIFI ici (doit correspondre au routeur pour la gateway)
 // ⚠️ IMPORTANT : Ce canal DOIT correspondre au canal de votre routeur WiFi
@@ -68,6 +71,63 @@
 
 // Adresse par défaut de la GW (B0:CB:D8:E9:0C:74)
 //const uint8_t MAC_GW[] = {0x08, 0xA6, 0xF7, 0x1C, 0xD0, 0x90}; //B0, 0xCB, 0xD8, 0xE9, 0x0C, 0x74};
+
+// structure des paramètres 
+typedef enum ParamType {
+  U8,
+  U16,
+  IP,
+  STR,
+  U32
+} ParamType;
+
+typedef struct Param {
+  const char* key;
+  uint8_t order;
+  ParamType type;
+ 
+  uint32_t min16;   // numeric lower bound (used for U8/U16/U32)
+  uint32_t max16;   // numeric upper bound
+ 
+  uint32_t def_u16; // default numeric value (fits U8/U16/U32)
+  uint8_t rtc_valid;  // 0: not valid, 1: valid
+  const char* def_str;
+  void* var;
+  uint8_t size;      // taille du buffer (0 pour U8/U16)
+} Param;
+
+// Forward declarations for variables used in PARAMS
+extern uint8_t mode_reseau;
+extern uint16_t nb_reset;
+extern uint8_t periode_cycle;
+extern uint8_t mode_rapide;
+extern uint8_t log_detail;
+extern uint8_t DelaiWebsocket;
+extern uint8_t skip_graph;
+extern uint16_t Seuil_batt_sonde;
+extern  uint8_t Nb_jours_Batt_log;
+extern  uint16_t prolong_veille;
+extern  uint8_t action_stockage;
+extern  uint8_t action_envoi;
+extern char nom_routeur[];
+extern char mdp_routeur[];
+extern uint8_t websocket_on;
+extern char ip_websocket[];
+extern uint8_t id_websocket;
+extern uint8_t WIFI_CHANNEL;
+extern  uint8_t last_wifi_channel;
+extern IPAddress local_ip;
+extern IPAddress gateway;
+extern IPAddress subnet;
+extern IPAddress primaryDNS;
+extern IPAddress secondaryDNS;
+extern char latitude[];
+extern char longitude[];
+extern uint8_t pas_de_veille;
+
+
+extern const size_t PARAMS_COUNT;
+extern Param PARAMS[];
 
 
 
@@ -295,8 +355,6 @@ extern QueueHandle_t eventQueue;  // File d'attente des événements sequenceur
 extern uint16_t erreur_queue;
 extern TimerHandle_t debounceTimer;
 extern TimerHandle_t xTimer_activ_chaud;
-extern  uint8_t periode_cycle;
-extern  uint8_t mode_rapide;
 
 extern  uint16_t compteur_detection;
 extern  uint16_t Nb_PI[];
@@ -305,7 +363,6 @@ extern float Tint, Text, Humid;
 
 extern uint8_t cpt_securite;
 extern uint8_t WIFI_CHANNEL;
-extern  uint8_t last_wifi_channel;     // Mémorisation du canal Wifi en DeepSleep
 extern uint8_t rtc_valid;  // 0:cold reset  1:reset apres deep sleep
 extern  uint16_t cpt_cycle_batt;                   // Compteur cycles pour mesure batterie
 extern volatile uint8_t ackReceived;  // global pour indiquer que le peer a acké
@@ -313,7 +370,6 @@ extern volatile int ackChannel;       // canal où ça a marché
 extern uint8_t mode_reseau;
 extern  uint8_t init_time;
 extern float heure;
-extern  uint8_t skip_graph;
 
 extern unsigned long last_remote_Tint_time, last_remote_Text_time,
     last_remote_heure_time;
@@ -322,7 +378,6 @@ extern  uint16_t err_Tint, err_Text, err_Heure;
 extern  float tempI_moy24h, tempE_moy24h, Hum_24h, HA_moy24h, PIR_24h;
 extern  uint16_t cpt24_Tint, cpt24_Text, cpt24_Hum, cpt24_HA, cpt24_PIR;
 
-extern  uint8_t action_envoi;
 
 extern char mdp_routeur[];
 extern  int16_t graphique[NB_Val_Graph][NB_Graphique];
@@ -333,7 +388,6 @@ extern uint8_t type_reveil;  //0:pas de reveil 1: réveil par timer, 2: réveil 
 
 
 extern  uint8_t etat_now;
-extern  uint8_t Nb_jours_Batt_log;
 
 extern  bool force_stay_awake;
 extern unsigned long wake_up_time;  // Temps de réveil/dernière activité
@@ -346,7 +400,6 @@ void log_erreur(uint8_t code, uint8_t valeur,
                 uint8_t val2);  // Code:1:Tint, 2:Text, 3:TPac;
 void init_10_secondes();
 void setup_0();
-void setup_nvs();
 void setup_1();
 void setup_2();
 uint8_t requete_action_appli(const char* reg, const char* data);
