@@ -79,6 +79,7 @@ uint8_t parseMacString(const char* str, uint8_t mac[6]);
 
 uint8_t envoi_now(uint8_t channel, esp_now_peer_info_t * peerInfo, Message_EspNow *message);
 uint8_t envoi_data_gateway(Message_EspNow mess_esp);
+static void surv_force_relays_on();
 
 
 #ifdef Temp_int_DS18B20
@@ -190,6 +191,9 @@ void setup_0()
 // setup apres la lecture nvs, avant démarrage reseau
 void setup_1()
 {
+    // Dès le démarrage (après lecture NVS), forcer les relais à ON
+    // même si la surveillance est désactivée.
+    surv_force_relays_on();
 
     Tint = 15;
     #ifdef Temp_int_HDC1080
@@ -1175,6 +1179,21 @@ uint8_t envoi_now(uint8_t channel, esp_now_peer_info_t * peerInfo, Message_EspNo
 // ============================================================
 
 // ---- Fonctions internes ----
+static void surv_force_relays_on()
+{
+    // Sécurité boot : remettre systématiquement les relais à ON
+    // pour éviter un OFF permanent après un reset intempestif.
+    if (surv_pin_relay_box) {
+        pinMode(surv_pin_relay_box, OUTPUT);
+        digitalWrite(surv_pin_relay_box, HIGH);
+        Serial.printf("Surv: relay box pin%u force ON (boot)\n", surv_pin_relay_box);
+    }
+    if (surv_pin_relay_deco) {
+        pinMode(surv_pin_relay_deco, OUTPUT);
+        digitalWrite(surv_pin_relay_deco, HIGH);
+        Serial.printf("Surv: relay deco pin%u force ON (boot)\n", surv_pin_relay_deco);
+    }
+}
 
 static void surv_log_entry(uint8_t device, uint8_t test_type, uint8_t result, uint8_t fc)
 {
@@ -1442,17 +1461,12 @@ void surv_handle_backoff_end()
 // Initialisation GPIO relays + démarrage timer test (appelé depuis setup_2)
 void surv_init()
 {
-    if (!surv_en) return;
+    // Toujours remettre les relais ON à l'init.
+    surv_force_relays_on();
 
-    if (surv_pin_relay_box) {
-        pinMode(surv_pin_relay_box, OUTPUT);
-        digitalWrite(surv_pin_relay_box, HIGH);  // relay fermé (équipement sous tension)
-        Serial.printf("Surv: relay box pin%u init ON\n", surv_pin_relay_box);
-    }
-    if (surv_pin_relay_deco) {
-        pinMode(surv_pin_relay_deco, OUTPUT);
-        digitalWrite(surv_pin_relay_deco, HIGH);
-        Serial.printf("Surv: relay deco pin%u init ON\n", surv_pin_relay_deco);
+    if (!surv_en) {
+        surv_state = SURV_IDLE;
+        return;
     }
     surv_state         = SURV_IDLE;
     surv_device        = 0;
