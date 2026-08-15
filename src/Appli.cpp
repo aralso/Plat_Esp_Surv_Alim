@@ -16,6 +16,7 @@
 #include <HTTPClient.h>
 #include "ClosedCube_HDC1080.h"
 #include "Wire.h"
+#include "time.h"
 
 extern WiFiClient client;
 extern Preferences preferences_nvs;  // Déclaration externe
@@ -114,6 +115,59 @@ RTC_DATA_ATTR int16_t calib_hygro1=300, calib_hygro2=800, calib_temp=1000; // ca
 int readLastLogsG(int nombre);
 
 
+// ============================================================
+// ===        SURVEILLANCE BOX/DECO                         ===
+// ============================================================
+
+#define SURV_LOG_SIZE    50
+#define SURV_BACKOFF_MAX  7
+
+// Structure entrée log RAM (11 octets × 50 = 550 octets)
+typedef struct {
+    uint8_t ts_year;    // années depuis 2000
+    uint8_t ts_mon;     // 1-12
+    uint8_t ts_day;     // 1-31
+    uint8_t ts_hour;    // 0-23
+    uint8_t ts_min;     // 0-59
+    uint8_t ts_sec;     // 0-59
+    uint8_t device;     // 1=Box, 2=Deco, 3=Internet(→Box)
+    uint8_t test_type;  // 1=WiFi, 2=TCP_Deco, 3=TCP_Box, 4=TCP_Internet
+    uint8_t result;     // 0=OK, 1=Fail
+    uint8_t fail_count; // nb échecs consécutifs à ce moment
+    uint8_t state;      // état machine (surv_state_t casté en uint8_t)
+} SurvLogRam_t;
+
+static SurvLogRam_t surv_log[SURV_LOG_SIZE];
+static uint8_t      surv_log_idx   = 0;   // prochain index d'écriture (circulaire)
+static uint8_t      surv_log_count = 0;   // nb entrées valides
+
+// Machine à états (une seule pour les 2 équipements)
+surv_state_t surv_state          = SURV_IDLE;
+uint8_t      surv_device         = 0;   // 1=Box, 2=Deco, 3=Internet→Box
+uint8_t      surv_confirm_count  = 0;   // confirmations effectuées
+static uint8_t      surv_verif_count    = 0;   // vérifications OK post-boot
+uint8_t      surv_success_count  = 0;   // succès consécutifs (reset backoff)
+uint8_t      surv_restart_count_box  = 0;
+uint8_t      surv_restart_count_deco = 0;
+
+// Paramètres NVS — définis ici, déclarés extern dans variables.h
+uint8_t  surv_en                = 0;
+char     surv_ip_box[20]        = "192.168.247.1";
+char     surv_ip_deco[20]       = "192.168.253.1";
+uint16_t surv_port              = 80;
+uint16_t surv_intervalle_normal = 120;
+uint16_t surv_intervalle_confirm= 30;
+uint16_t surv_boot_box          = 300;
+uint16_t surv_boot_deco         = 150;
+uint8_t  surv_nb_confirm        = 2;
+uint8_t  surv_pin_relay_box     = 0;
+uint8_t  surv_pin_relay_deco    = 0;
+
+// Table de backoff (secondes) : 5min, 15min, 30min, 1h, 2h, 4h, 6h
+static const uint32_t SURV_BACKOFF_DELAYS[SURV_BACKOFF_MAX] = {
+    5*60, 15*60, 30*60, 60*60, 120*60, 240*60, 360*60   };
+
+
 
 // ----------  FONCTIONS APPLI --------------
 
@@ -188,7 +242,6 @@ void setup_1()
 void setup_2()
 {
 
-
   #ifdef ESP_TJ_ACTIF
 
     // lecture des données sauvegardées dans la partition log_flashG
@@ -205,11 +258,6 @@ void setup_2()
     esp_wifi_get_channel(&current_channel, &second);
     Serial.printf("Canal WiFi AVANT config ESP-NOW: %d\n", current_channel);
     
-    // Forcer le canal si nécessaire (doit correspondre au routeur)
-    // esp_wifi_set_promiscuous(true);
-    // esp_wifi_set_channel(WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
-    // esp_wifi_set_promiscuous(false);
-    
     if (esp_now_init() != ESP_OK) {
       Serial.println("Erreur initialisation ESP-NOW");
       return;
@@ -222,9 +270,6 @@ void setup_2()
     Serial.println("\n\n======================================");
     Serial.println("🔵 ESP-NOW Initialisé (RÉCEPTEUR)");
     Serial.print("   MAC Address module: ");
-    //if ((mode_reseau==13) )
-    //else
-    //  Serial.println(WiFi.softAPmacAddress());
     Serial.println(WiFi.macAddress());
 
     // Stockage de l'adresse MAC dans le tableau mac_gw[6]
@@ -242,6 +287,9 @@ void setup_2()
       readLastLogsG(99);
 
   #endif
+
+  // Démarrage surveillance réseau Box/Deco (si activée via SuEn)
+  surv_init();
 }
 
 
@@ -357,6 +405,12 @@ uint8_t requete_GetReg_appli(int reg, float *valeur)
     *valeur = (float)current_channel;
   }
 
+  // Registres ram surveillance (lecture seule)
+  if (reg == 100) { res = 0; *valeur = (float)surv_state; }           // état machine
+  if (reg == 101) { res = 0; *valeur = (float)surv_device; }          // équipement en cours
+  if (reg == 102) { res = 0; *valeur = (float)surv_restart_count_box;  }  // nb restarts box
+  if (reg == 103) { res = 0; *valeur = (float)surv_restart_count_deco; }  // nb restarts deco
+
   return res;
 }
 
@@ -366,6 +420,25 @@ uint8_t requete_SetReg_appli(int param, float valeurf)
   int16_t valeur = int16_t(round(valeurf));
   uint8_t res = 1;
   (void)valeur;
+
+  // Activation/désactivation dynamique de la surveillance (reg 70 = SuEn)
+  if (param == 70) {
+    res = 0;
+    surv_en = (uint8_t)(valeur > 0);
+    preferences_nvs.putUChar("SuEn", surv_en);
+    if (surv_en) {
+      surv_init();
+    } else {
+      xTimerStop(xTimer_SurvTest,    100);
+      xTimerStop(xTimer_SurvOff,     100);
+      xTimerStop(xTimer_SurvBoot,    100);
+      xTimerStop(xTimer_SurvBackoff, 100);
+      if (surv_pin_relay_box)  digitalWrite(surv_pin_relay_box,  HIGH);
+      if (surv_pin_relay_deco) digitalWrite(surv_pin_relay_deco, HIGH);
+      surv_state = SURV_IDLE;
+      Serial.println("Surv: desactivee, relays remis ON");
+    }
+  }
 
   return res;
 }
@@ -448,6 +521,23 @@ uint8_t requete_action_appli(const char *reg, const char *data)
       Serial.println(Tint_erreur);
       Serial.println(Tint);
     }
+
+  // Dump log RAM surveillance
+  if (strcmp(reg, "SurvLog") == 0) {
+    res = 0;
+    surv_dump_log_ram(buffer_dmp, MAX_DUMP);
+    Serial.println(buffer_dmp);
+  }
+
+  // Affiche l'état courant de la surveillance
+  if (strcmp(reg, "SurvSt") == 0) {
+    res = 0;
+    Serial.printf("Surv etat=%u dev=%u conf=%u suc=%u rbox=%u rdec=%u en=%u\n",
+                  (unsigned)surv_state, surv_device, surv_confirm_count,
+                  surv_success_count, surv_restart_count_box, surv_restart_count_deco,
+                  surv_en);
+  }
+
   return res;
 }
 
@@ -1080,3 +1170,334 @@ uint8_t envoi_now(uint8_t channel, esp_now_peer_info_t * peerInfo, Message_EspNo
 }
 
 
+// ============================================================
+// ===        SURVEILLANCE BOX/DECO                         ===
+// ============================================================
+
+// ---- Fonctions internes ----
+
+static void surv_log_entry(uint8_t device, uint8_t test_type, uint8_t result, uint8_t fc)
+{
+    SurvLogRam_t *e = &surv_log[surv_log_idx];
+    struct tm ti = {0};
+    getLocalTime(&ti, 100);
+    e->ts_year   = (uint8_t)(ti.tm_year + 1900 - 2000);
+    e->ts_mon    = (uint8_t)(ti.tm_mon + 1);
+    e->ts_day    = (uint8_t)ti.tm_mday;
+    e->ts_hour   = (uint8_t)ti.tm_hour;
+    e->ts_min    = (uint8_t)ti.tm_min;
+    e->ts_sec    = (uint8_t)ti.tm_sec;
+    e->device    = device;
+    e->test_type = test_type;
+    e->result    = result;
+    e->fail_count= fc;
+    e->state     = (uint8_t)surv_state;
+    surv_log_idx  = (surv_log_idx + 1) % SURV_LOG_SIZE;
+    if (surv_log_count < SURV_LOG_SIZE) surv_log_count++;
+}
+
+// TCP connect test : 0=ok, 1=fail (timeout 2s)
+static uint8_t surv_tcp_test(const char *ip, uint16_t port)
+{
+    if (WiFi.status() != WL_CONNECTED) return 1;
+    WiFiClient cl;
+    uint8_t ok = (uint8_t)cl.connect(ip, port, 2000);
+    cl.stop();
+    return ok ? 0 : 1;
+}
+
+// Test Internet via Google DNS 8.8.8.8:53 (timeout 3s)
+static uint8_t surv_internet_test()
+{
+    if (WiFi.status() != WL_CONNECTED) return 1;
+    WiFiClient cl;
+    uint8_t ok = (uint8_t)cl.connect("8.8.8.8", 53, 3000);
+    cl.stop();
+    return ok ? 0 : 1;
+}
+
+// Suite de tests hiérarchique avec log des échecs.
+// fc = compteur d'échecs consécutifs à passer dans le log.
+// Retourne : 0=ok, 1=Box, 2=Deco, 3=Internet(→Box)
+static uint8_t surv_run_tests(uint8_t fc)
+{
+    // T1 : WiFi associé
+    if (WiFi.status() != WL_CONNECTED) {
+        surv_log_entry(2, 1, 1, fc);
+        return 2;
+    }
+    // T2 : Deco LAN (192.168.253.1)
+    if (surv_tcp_test(surv_ip_deco, surv_port)) {
+        surv_log_entry(2, 2, 1, fc);
+        return 2;
+    }
+    // T3 : Box LAN via Deco (192.168.247.1)
+    if (surv_tcp_test(surv_ip_box, surv_port)) {
+        surv_log_entry(1, 3, 1, fc);
+        return 1;
+    }
+    // T4 : Internet via Google DNS 8.8.8.8:53
+    if (surv_internet_test()) {
+        surv_log_entry(3, 4, 1, fc);
+        return 3;   // FAI KO → on redémarre quand même la Box
+    }
+    return 0;
+}
+
+// Calcule le prochain délai de backoff et démarre le timer one-shot
+static void surv_enter_backoff()
+{
+    surv_state = SURV_BACKOFF;
+    xTimerStop(xTimer_SurvTest, 100);
+
+    uint8_t rc  = (surv_device == 2) ? surv_restart_count_deco : surv_restart_count_box;
+    // index 0 pour le 1er restart (rc=1 → idx=0 → 5min)
+    uint8_t idx = (rc > 0) ? (rc - 1) : 0;
+    if (idx >= SURV_BACKOFF_MAX) idx = SURV_BACKOFF_MAX - 1;
+    uint32_t delay_s  = SURV_BACKOFF_DELAYS[idx];
+    uint32_t bk_ticks = delay_s * (uint32_t)(1000 / portTICK_PERIOD_MS);
+
+    Serial.printf("Surv: BACKOFF %lus (restart#%u)\n", (unsigned long)delay_s, (unsigned)rc);
+    xTimerChangePeriod(xTimer_SurvBackoff, bk_ticks, 100);
+    // xTimerChangePeriod démarre automatiquement un timer dormant
+}
+
+// Coupe le relay concerné et programme la remise sous tension dans 15s
+static void surv_trigger_restart()
+{
+    activation_writelog();
+
+    uint8_t rc_log, idx_log;
+    if (surv_device == 2) {
+        rc_log  = surv_restart_count_deco;
+        idx_log = (surv_restart_count_deco < SURV_BACKOFF_MAX)
+                    ? surv_restart_count_deco : (SURV_BACKOFF_MAX - 1);
+        surv_restart_count_deco++;
+        if (surv_restart_count_deco > SURV_BACKOFF_MAX)
+            surv_restart_count_deco = SURV_BACKOFF_MAX;
+        writeLog('N', 2, rc_log, idx_log, "SurvDec");
+    } else {
+        rc_log  = surv_restart_count_box;
+        idx_log = (surv_restart_count_box < SURV_BACKOFF_MAX)
+                    ? surv_restart_count_box : (SURV_BACKOFF_MAX - 1);
+        surv_restart_count_box++;
+        if (surv_restart_count_box > SURV_BACKOFF_MAX)
+            surv_restart_count_box = SURV_BACKOFF_MAX;
+        writeLog('N', surv_device, rc_log, idx_log, "SurvBox");
+    }
+
+    surv_state = SURV_RELAY_OFF;
+    xTimerStop(xTimer_SurvTest, 100);
+
+    if (surv_device == 2) {
+        if (surv_pin_relay_deco) {
+            Serial.printf("Surv: RELAY DECO OFF (pin%u) 15s\n", surv_pin_relay_deco);
+            digitalWrite(surv_pin_relay_deco, LOW);
+        } else {
+            Serial.println("Surv: relay Deco non configuré (SuRD=0)");
+        }
+    } else {
+        if (surv_pin_relay_box) {
+            Serial.printf("Surv: RELAY BOX OFF (pin%u) 15s\n", surv_pin_relay_box);
+            digitalWrite(surv_pin_relay_box, LOW);
+        } else {
+            Serial.println("Surv: relay Box non configuré (SuRB=0)");
+        }
+    }
+    // Timer one-shot 15s → EVENT_SURV_RELAY_ON
+    xTimerChangePeriod(xTimer_SurvOff,
+                       (uint32_t)15 * (1000 / portTICK_PERIOD_MS), 100);
+}
+
+// ---- Handlers publics appelés depuis taskHandler ----
+
+// EVENT_SURV_TEST
+void surv_handle_test()
+{
+    if (!surv_en) return;
+    if (surv_state != SURV_IDLE &&
+        surv_state != SURV_CONFIRMING &&
+        surv_state != SURV_VERIF) return;
+
+    Serial.printf("Surv: test (état=%u)\n", (unsigned)surv_state);
+
+    if (surv_state == SURV_IDLE) {
+        uint8_t failed = surv_run_tests(1);
+        if (failed == 0) {
+            surv_success_count++;
+            if (surv_success_count >= 15) {
+                surv_restart_count_box  = 0;
+                surv_restart_count_deco = 0;
+                surv_success_count      = 0;
+                Serial.println("Surv: 15 succès consecutifs → reset backoff");
+            }
+        } else {
+            // Premier échec : log déjà fait dans surv_run_tests(fc=1)
+            surv_device        = failed;
+            surv_confirm_count = 0;
+            surv_success_count = 0;
+            surv_state         = SURV_CONFIRMING;
+            Serial.printf("Surv: 1er echec device=%u → CONFIRMING\n", surv_device);
+            xTimerChangePeriod(xTimer_SurvTest,
+                (uint32_t)surv_intervalle_confirm * (1000 / portTICK_PERIOD_MS), 100);
+        }
+    }
+    else if (surv_state == SURV_CONFIRMING) {
+        // fc = 2 pour 1ère confirmation, 3 pour 2ème, etc.
+        uint8_t failed = surv_run_tests(surv_confirm_count + 2);
+        if (failed == 0) {
+            // Récupération spontanée
+            Serial.println("Surv: recuperation spontanee → IDLE");
+            surv_state         = SURV_IDLE;
+            surv_confirm_count = 0;
+            xTimerChangePeriod(xTimer_SurvTest,
+                (uint32_t)surv_intervalle_normal * (1000 / portTICK_PERIOD_MS), 100);
+        } else {
+            surv_confirm_count++;
+            Serial.printf("Surv: confirmation %u/%u\n",
+                          surv_confirm_count, surv_nb_confirm);
+            if (surv_confirm_count >= surv_nb_confirm) {
+                surv_trigger_restart();
+            }
+        }
+    }
+    else if (surv_state == SURV_VERIF) {
+        uint8_t failed = surv_run_tests(99);
+        if (failed == 0) {
+            surv_verif_count++;
+            Serial.printf("Surv: verif OK %u/2\n", surv_verif_count);
+            if (surv_verif_count >= 2) {
+                Serial.println("Surv: retablissement confirme → IDLE");
+                surv_state         = SURV_IDLE;
+                surv_confirm_count = 0;
+                surv_verif_count   = 0;
+                surv_success_count = 0;
+                xTimerChangePeriod(xTimer_SurvTest,
+                    (uint32_t)surv_intervalle_normal * (1000 / portTICK_PERIOD_MS), 100);
+            }
+        } else {
+            // Encore en échec après redémarrage → backoff
+            Serial.println("Surv: verif echouee → BACKOFF");
+            surv_verif_count = 0;
+            surv_enter_backoff();
+        }
+    }
+}
+
+// EVENT_SURV_RELAY_ON : 15s écoulés → relay ON, démarrage boot_wait
+void surv_handle_relay_on()
+{
+    if (!surv_en) return;
+    if (surv_state != SURV_RELAY_OFF) return;
+
+    uint16_t boot_s;
+    if (surv_device == 2) {
+        if (surv_pin_relay_deco) {
+            Serial.printf("Surv: RELAY DECO ON (pin%u)\n", surv_pin_relay_deco);
+            digitalWrite(surv_pin_relay_deco, HIGH);
+        }
+        boot_s = surv_boot_deco;
+    } else {
+        if (surv_pin_relay_box) {
+            Serial.printf("Surv: RELAY BOX ON (pin%u)\n", surv_pin_relay_box);
+            digitalWrite(surv_pin_relay_box, HIGH);
+        }
+        boot_s = surv_boot_box;
+    }
+    surv_state = SURV_BOOT_WAIT;
+    Serial.printf("Surv: relay ON, attente boot %us\n", (unsigned)boot_s);
+    // Timer one-shot boot_wait → EVENT_SURV_BOOT_DONE
+    xTimerChangePeriod(xTimer_SurvBoot,
+        (uint32_t)boot_s * (1000 / portTICK_PERIOD_MS), 100);
+}
+
+// EVENT_SURV_BOOT_DONE : boot terminé → lancer vérifications
+void surv_handle_boot_done()
+{
+    if (!surv_en) return;
+    if (surv_state != SURV_BOOT_WAIT) return;
+
+    Serial.println("Surv: boot termine → VERIF");
+    surv_state       = SURV_VERIF;
+    surv_verif_count = 0;
+    // Démarrer le timer de test en mode confirmation (30s)
+    xTimerChangePeriod(xTimer_SurvTest,
+        (uint32_t)surv_intervalle_confirm * (1000 / portTICK_PERIOD_MS), 100);
+}
+
+// EVENT_SURV_BACKOFF : fin du backoff → relancer une séquence de confirmation
+void surv_handle_backoff_end()
+{
+    if (!surv_en) return;
+    if (surv_state != SURV_BACKOFF) return;
+
+    Serial.println("Surv: fin backoff → CONFIRMING");
+    surv_state         = SURV_CONFIRMING;
+    surv_confirm_count = 0;
+    surv_verif_count   = 0;
+    xTimerChangePeriod(xTimer_SurvTest,
+        (uint32_t)surv_intervalle_confirm * (1000 / portTICK_PERIOD_MS), 100);
+}
+
+// Initialisation GPIO relays + démarrage timer test (appelé depuis setup_2)
+void surv_init()
+{
+    if (!surv_en) return;
+
+    if (surv_pin_relay_box) {
+        pinMode(surv_pin_relay_box, OUTPUT);
+        digitalWrite(surv_pin_relay_box, HIGH);  // relay fermé (équipement sous tension)
+        Serial.printf("Surv: relay box pin%u init ON\n", surv_pin_relay_box);
+    }
+    if (surv_pin_relay_deco) {
+        pinMode(surv_pin_relay_deco, OUTPUT);
+        digitalWrite(surv_pin_relay_deco, HIGH);
+        Serial.printf("Surv: relay deco pin%u init ON\n", surv_pin_relay_deco);
+    }
+    surv_state         = SURV_IDLE;
+    surv_device        = 0;
+    surv_confirm_count = 0;
+    surv_verif_count   = 0;
+    surv_success_count = 0;
+
+    xTimerChangePeriod(xTimer_SurvTest,
+        (uint32_t)surv_intervalle_normal * (1000 / portTICK_PERIOD_MS), 100);
+    xTimerStart(xTimer_SurvTest, 100);
+
+    Serial.printf("Surv: demarree box=%s deco=%s port=%u interv=%us confirm=%u\n",
+                  surv_ip_box, surv_ip_deco, surv_port,
+                  surv_intervalle_normal, surv_nb_confirm);
+}
+
+// Dump log RAM vers un buffer texte (UART ou page web)
+void surv_dump_log_ram(char *buf, size_t maxlen)
+{
+    if (!maxlen) return;
+    uint8_t count = (surv_log_count < SURV_LOG_SIZE) ? surv_log_count : SURV_LOG_SIZE;
+    uint8_t start = (surv_log_count >= SURV_LOG_SIZE) ? surv_log_idx : 0;
+
+    int n = snprintf(buf, maxlen,
+        "=== Log Surv RAM %u entrees  etat=%u dev=%u rbox=%u rdec=%u ===\n",
+        count, (unsigned)surv_state, surv_device,
+        surv_restart_count_box, surv_restart_count_deco);
+
+    static const char *dev_names[]  = {"?",   "Box",  "Dec",  "Int"};
+    static const char *test_names[] = {"?",   "WiFi", "TCPD", "TCPB", "TCPI"};
+    static const char *st_names[]   = {"IDLE","CONF", "ROFF", "BOOT", "VERI","BACK"};
+
+    for (uint8_t k = 0; k < count && (size_t)n < maxlen - 80; k++) {
+        uint8_t i  = (start + k) % SURV_LOG_SIZE;
+        const SurvLogRam_t *e = &surv_log[i];
+        uint8_t st = (e->state      < 6) ? e->state      : 0;
+        uint8_t dv = (e->device     < 4) ? e->device     : 0;
+        uint8_t tt = (e->test_type  < 5) ? e->test_type  : 0;
+        n += snprintf(buf + n, maxlen - n,
+            "%02u/%02u/%02u %02u:%02u:%02u %s %s %s fc:%u [%s]\n",
+            e->ts_day, e->ts_mon, e->ts_year,
+            e->ts_hour, e->ts_min, e->ts_sec,
+            dev_names[dv], test_names[tt],
+            e->result ? "FAIL" : "OK",
+            e->fail_count, st_names[st]);
+    }
+    buf[maxlen - 1] = '\0';
+}

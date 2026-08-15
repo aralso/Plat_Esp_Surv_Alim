@@ -312,6 +312,12 @@ TimerHandle_t xTimer_Cycle;
 //TimerHandle_t xTimer_Compresseur;
 TimerHandle_t xTimer_Securite;
 
+// Timers surveillance Box/Deco
+TimerHandle_t xTimer_SurvTest;
+TimerHandle_t xTimer_SurvOff;
+TimerHandle_t xTimer_SurvBoot;
+TimerHandle_t xTimer_SurvBackoff;
+
 
 
 WiFiClient client;
@@ -571,6 +577,43 @@ void vTimerWatchdogCallback(TimerHandle_t xTimer)
       if (erreur_queue<5) num_err_queue[erreur_queue]=5;
       erreur_queue++;
     }
+}
+
+// ---- Callbacks surveillance Box/Deco ----
+void vTimerSurvTestCallback(TimerHandle_t xTimer)
+{
+  systeme_eve_t evt = { EVENT_SURV_TEST, 0 };
+  if (xQueueSendFromISR(eventQueue, &evt, NULL) != pdTRUE) {
+    if (erreur_queue < 5) num_err_queue[erreur_queue] = 10;
+    erreur_queue++;
+  }
+}
+
+void vTimerSurvOffCallback(TimerHandle_t xTimer)
+{
+  systeme_eve_t evt = { EVENT_SURV_RELAY_ON, 0 };
+  if (xQueueSendFromISR(eventQueue, &evt, NULL) != pdTRUE) {
+    if (erreur_queue < 5) num_err_queue[erreur_queue] = 11;
+    erreur_queue++;
+  }
+}
+
+void vTimerSurvBootCallback(TimerHandle_t xTimer)
+{
+  systeme_eve_t evt = { EVENT_SURV_BOOT_DONE, 0 };
+  if (xQueueSendFromISR(eventQueue, &evt, NULL) != pdTRUE) {
+    if (erreur_queue < 5) num_err_queue[erreur_queue] = 12;
+    erreur_queue++;
+  }
+}
+
+void vTimerSurvBackoffCallback(TimerHandle_t xTimer)
+{
+  systeme_eve_t evt = { EVENT_SURV_BACKOFF, 0 };
+  if (xQueueSendFromISR(eventQueue, &evt, NULL) != pdTRUE) {
+    if (erreur_queue < 5) num_err_queue[erreur_queue] = 13;
+    erreur_queue++;
+  }
 }
 
 
@@ -1047,6 +1090,22 @@ void taskHandler(void *parameter) {
 
                 case EVENT_CYCLE:
                   event_cycle();
+                  break;
+
+                case EVENT_SURV_TEST:
+                  surv_handle_test();
+                  break;
+
+                case EVENT_SURV_RELAY_ON:
+                  surv_handle_relay_on();
+                  break;
+
+                case EVENT_SURV_BOOT_DONE:
+                  surv_handle_boot_done();
+                  break;
+
+                case EVENT_SURV_BACKOFF:
+                  surv_handle_backoff_end();
                   break;
 
                   
@@ -1601,6 +1660,16 @@ void setup()
   // Timer de Délai pour watchdog : 13 sec
   xTimer_Watchdog= xTimerCreate ("Watchdog", (uint32_t)WDT_TIMEOUT*(300/portTICK_PERIOD_MS), pdTRUE, (void *) 0, vTimerWatchdogCallback);
   if (xTimer_Watchdog == NULL)  Serial.println("Erreur : timer xTimer_Watchdog non créé !");
+
+  // Timers surveillance Box/Deco
+  xTimer_SurvTest = xTimerCreate("SurvTest", (uint32_t)120*(1000/portTICK_PERIOD_MS), pdTRUE,  (void*)0, vTimerSurvTestCallback);
+  if (xTimer_SurvTest    == NULL) Serial.println("Erreur : timer xTimer_SurvTest non créé !");
+  xTimer_SurvOff  = xTimerCreate("SurvOff",  (uint32_t)15 *(1000/portTICK_PERIOD_MS), pdFALSE, (void*)0, vTimerSurvOffCallback);
+  if (xTimer_SurvOff     == NULL) Serial.println("Erreur : timer xTimer_SurvOff non créé !");
+  xTimer_SurvBoot = xTimerCreate("SurvBoot", (uint32_t)300*(1000/portTICK_PERIOD_MS), pdFALSE, (void*)0, vTimerSurvBootCallback);
+  if (xTimer_SurvBoot    == NULL) Serial.println("Erreur : timer xTimer_SurvBoot non créé !");
+  xTimer_SurvBackoff = xTimerCreate("SurvBkof",(uint32_t)5*60*(1000/portTICK_PERIOD_MS), pdFALSE,(void*)0, vTimerSurvBackoffCallback);
+  if (xTimer_SurvBackoff == NULL) Serial.println("Erreur : timer xTimer_SurvBackoff non créé !");
 
 
 

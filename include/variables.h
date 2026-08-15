@@ -315,8 +315,23 @@ typedef enum {
   EVENT_24H,
   EVENT_3min,
   EVENT_CYCLE,
-  EVENT_UART1
+  EVENT_UART1,
+  // Surveillance Box/Deco
+  EVENT_SURV_TEST,      // déclencher la suite de tests
+  EVENT_SURV_RELAY_ON,  // 15s relay-OFF écoulés → remettre sous tension
+  EVENT_SURV_BOOT_DONE, // délai boot terminé → lancer vérifications
+  EVENT_SURV_BACKOFF    // délai backoff terminé → relancer confirmation
 } systeme_eve_type_t;
+
+// État de la machine à états surveillance (une seule pour les 2 équipements)
+typedef enum {
+  SURV_IDLE = 0,   // surveillance normale, test périodique
+  SURV_CONFIRMING, // échec détecté, confirmations en cours
+  SURV_RELAY_OFF,  // relay coupé 15s
+  SURV_BOOT_WAIT,  // relay remis, attente démarrage
+  SURV_VERIF,      // vérifications post-boot
+  SURV_BACKOFF     // attente entre redémarrages
+} surv_state_t;
 
 // Structure d'un événement tache sequenceur
 typedef struct {
@@ -355,6 +370,12 @@ extern QueueHandle_t eventQueue;  // File d'attente des événements sequenceur
 extern uint16_t erreur_queue;
 extern TimerHandle_t debounceTimer;
 extern TimerHandle_t xTimer_activ_chaud;
+
+// Timers surveillance Box/Deco
+extern TimerHandle_t xTimer_SurvTest;    // test périodique
+extern TimerHandle_t xTimer_SurvOff;     // relay OFF → ON (15s)
+extern TimerHandle_t xTimer_SurvBoot;    // attente boot post-relay
+extern TimerHandle_t xTimer_SurvBackoff; // délai backoff variable
 
 extern  uint16_t compteur_detection;
 extern  uint16_t Nb_PI[];
@@ -424,5 +445,27 @@ void protectUARTDuringWiFi();
 // Configuration DHT22
 #define DHT22_TIMEOUT_MS 5000       // Timeout de lecture DHT22 en millisecondes
 #define DHT22_MIN_INTERVAL_MS 2000  // Intervalle minimum entre lectures DHT22
+
+// ---- Surveillance Box/Deco ----
+// Paramètres NVS
+extern uint8_t  surv_en;
+extern char     surv_ip_box[20];
+extern char     surv_ip_deco[20];
+extern uint16_t surv_port;
+extern uint16_t surv_intervalle_normal;
+extern uint16_t surv_intervalle_confirm;
+extern uint16_t surv_boot_box;
+extern uint16_t surv_boot_deco;
+extern uint8_t  surv_nb_confirm;
+extern uint8_t  surv_pin_relay_box;
+extern uint8_t  surv_pin_relay_deco;
+
+// Fonctions publiques
+void surv_init();
+void surv_handle_test();
+void surv_handle_relay_on();
+void surv_handle_boot_done();
+void surv_handle_backoff_end();
+void surv_dump_log_ram(char *buf, size_t maxlen);
 
 #endif

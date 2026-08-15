@@ -45,6 +45,19 @@ Param PARAMS[] = {
   {"WSock", 58, STR, 0, 0, 0, 0, "websocket", ip_websocket, 40},              // websocket adresse
   {"WSId", 59, U8, 0, 9, 9, 0,nullptr, &id_websocket, 0},             // 1, 2, 3
 
+  // Surveillance Box/Deco (registres 70-80)
+  {"SuEn", 70, U8,  0, 1,   0, 0, nullptr, &surv_en,                0},
+  {"SuIB", 71, STR, 0, 0,   0, 0, "192.168.247.1", surv_ip_box,    20},
+  {"SuID", 72, STR, 0, 0,   0, 0, "192.168.253.1", surv_ip_deco,   20},
+  {"SuPo", 73, U16, 70, 1500, 80, 0, nullptr, &surv_port,           0},
+  {"SuTn", 74, U16, 30, 3600, 120, 0, nullptr, &surv_intervalle_normal,   0},
+  {"SuTf", 75, U16, 10, 300,  30, 0, nullptr, &surv_intervalle_confirm,   0},
+  {"SuBx", 76, U16, 30, 600, 300, 0, nullptr, &surv_boot_box,       0},
+  {"SuBd", 77, U16, 30, 600, 150, 0, nullptr, &surv_boot_deco,      0},
+  {"SuCf", 78, U8,  1, 10,   2, 0, nullptr, &surv_nb_confirm,       0},
+  {"SuRB", 79, U8,  0, 39,   0, 0, nullptr, &surv_pin_relay_box,    0},
+  {"SuRD", 80, U8,  0, 39,   0, 0, nullptr, &surv_pin_relay_deco,   0},
+
 };
 
 // Provide number of entries for other translation units

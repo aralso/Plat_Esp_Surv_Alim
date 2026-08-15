@@ -306,6 +306,19 @@ const char index_html[] PROGMEM = R"rawliteral(
                   46 : calib hygro30<br>
                   47 : calib hygro80<br>
                   48 : calib température<br>
+                  70 : SuEn (surveillance 0/1)<br>
+                  73 : SuPo (port test TCP)<br>
+                  74 : SuTn (intervalle test normal s)<br>
+                  75 : SuTf (intervalle confirmation s)<br>
+                  76 : SuBx (boot_wait box s)<br>
+                  77 : SuBd (boot_wait deco s)<br>
+                  78 : SuCf (nb confirmations)<br>
+                  79 : SuRB (GPIO relais box)<br>
+                  80 : SuRD (GPIO relais deco)<br>
+                  100 : RAM surv_state<br>
+                  101 : RAM surv_device<br>
+                  102 : RAM surv_restart_count_box<br>
+                  103 : RAM surv_restart_count_deco<br>
                   <br>
 
               <div class="input-group" id="set-regT-group">
@@ -344,6 +357,8 @@ const char index_html[] PROGMEM = R"rawliteral(
                   10 : websock id<br>
                   11 : (L)adresse Mac module<br>
                   12 : adresse Mac Serveur<br>
+                  71 : SuIB (IP box, string NVS)<br>
+                  72 : SuID (IP deco, string NVS)<br>
     
 
             <div>
